@@ -1,5 +1,3 @@
--- Headless UI scheduler and real POSIX subprocesses for integration tests.
--- Run test scripts from the plugin directory with LuaJIT 2.1.
 local plugin_dir = arg[1] or "annas.koplugin"
 package.path = plugin_dir .. "/?.lua;" .. plugin_dir .. "/?/init.lua;" .. package.path
 io.stdout:setvbuf("no")
@@ -112,8 +110,7 @@ local function run_until(predicate, limit)
 end
 
 local function finish()
-    -- Trapper intentionally schedules reaping 5 seconds after cancellation.
-    -- Drive just these cleanup callbacks early after the child has exited.
+
     for _, pid in ipairs(spawned) do
         run_until(function() return native.isSubProcessDone(pid) end)
     end

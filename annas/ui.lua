@@ -64,15 +64,16 @@ end
 
 function Ui.showLoadingMessage(text, cancellable)
     if cancellable then
-        text = text .. "\n\n" .. T("Tap anywhere to cancel.")
+        local ProgressbarDialog = require("ui/widget/progressbardialog")
+        local dialog = ProgressbarDialog:new{
+            title = text,
+            subtitle = T("Tap anywhere to cancel."),
+            modal = true,
+        }
+        dialog:show()
+        return dialog
     end
-    -- timeout=0 schedules an immediate dismissal once the UI starts yielding.
-    -- AsyncHelper owns the operation deadline and cancellation callback.
-    local message = InfoMessage:new{
-        text = text,
-        dismissable = true,
-        flush_events_on_show = true,
-    }
+    local message = InfoMessage:new{ text = text, dismissable = true }
     UIManager:show(message)
     return message
 end

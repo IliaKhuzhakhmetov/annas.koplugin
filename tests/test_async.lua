@@ -1,11 +1,79 @@
--- Run from the plugin directory: luajit tests/test_async.lua .
 local h = dofile("tests/headless.lua")
+local Container = {}
+function Container:extend(fields)
+    return setmetatable(fields, {__index = self})
+end
+function Container:new(fields)
+    fields = fields or {}
+    fields.key_events, fields.ges_events = {}, {}
+    setmetatable(fields, {__index = self})
+    if fields.init then fields:init() end
+    return fields
+end
+local screen = {
+    getSize = function() return {w = 600, h = 800} end,
+    getWidth = function() return 600 end,
+    getHeight = function() return 800 end,
+    scaleBySize = function(_, n) return n end,
+}
+package.preload.device = function()
+    return {screen = screen, input = {group = {Any = {}}},
+        hasKeys = function() return true end, isTouchDevice = function() return true end}
+end
+for _, name in ipairs{
+    "ui/widget/container/inputcontainer", "ui/widget/container/framecontainer",
+    "ui/widget/verticalgroup", "ui/widget/textwidget", "ui/geometry", "ui/gesturerange",
+} do
+    package.preload[name] = function() return Container end
+end
+package.preload["ui/widget/progresswidget"] = function()
+    return Container:extend{setPercentage = function(self, n) self.percentage = n end}
+end
+package.preload["ffi/blitbuffer"] = function() return {COLOR_BLACK = 0, COLOR_WHITE = 1} end
+package.preload["ui/font"] = function() return {getFace = function() return {} end} end
+package.preload["ui/size"] = function()
+    return {padding = {large = 8}, margin = {tiny = 1}, radius = {window = 2}, border = {window = 1}}
+end
+package.preload.dbg = function() return {guard = function() end} end
+package.preload["ui/time"] = function() return {now = function() return h.now() * 1000000 end} end
+package.preload["ui/widget/progressbardialog"] = function()
+    return dofile("tests/upstream/progressbardialog.lua")
+end
 local Trapper = dofile("tests/upstream/trapper.lua")
 package.preload["ui/trapper"] = function() return Trapper end
 local Async = require("annas.async_helper")
 local ffi = require("ffi")
 local UI, Ui, test, run_until, native, now = h.UI, h.Ui, h.test, h.run_until, h.native, h.now
 local warnings = h.warnings
+
+test("cancellable tasks use KOReader's native progress dialog", function()
+    local message = Ui.showLoadingMessage("Searching", true)
+    assert(message.title == "Searching" and message.subtitle == "Tap anywhere to cancel.")
+    assert(message.modal and message.onTapClose and message.onAnyKeyPressed)
+    assert(not message.progress_bar_visible)
+    message:close()
+end)
+
+test("native keyboard cancellation stops the background task", function()
+    local cancelled
+    local message = Ui.showLoadingMessage("Searching", true)
+    UI:scheduleIn(0.02, function() message:onAnyKeyPressed() end)
+    Async.run(function() ffi.C.usleep(10000000) end,
+        function() error("cancelled task succeeded") end, function(err) error(err) end,
+        message, {on_cancel = function() cancelled = true end})
+    run_until(function() return cancelled end)
+    assert(#h.killed() == 1)
+end)
+
+test("default loading dialog is native and closes after success", function()
+    local result
+    Async.run(function() ffi.C.usleep(50000); return "done" end,
+        function(value) result = value end, function(err) error(err) end)
+    local message = next(UI.widgets)
+    assert(message and message.title == "Please wait…" and message.onTapClose)
+    run_until(function() return result ~= nil end)
+    assert(result == "done" and message._annas_closed)
+end)
 
 test("slow request yields UI; results survive serialization", function()
     local result, heartbeat
@@ -26,7 +94,7 @@ end)
 test("tap cancels a hung worker without success/error or late result", function()
     local succeeded, failed, cancelled
     local message = Ui.showLoadingMessage("Searching", true)
-    UI:scheduleIn(0.04, function() UI:close(message) end)
+    UI:scheduleIn(0.04, function() message:onTapClose() end)
     Async.run(function()
         ffi.C.usleep(10000000)
         return "late result"
@@ -54,7 +122,7 @@ test("cancel kills shell and curl/wget-like descendants too", function()
     local cancelled
     UI:scheduleIn(0.08, function() UI:close(message) end)
     Async.run(function()
-        -- Delayed output stands in for a network command still running.
+
         local pipe = assert(io.popen("sleep 0.4; printf stale > '" .. marker .. "'; printf result", "r"))
         local data = pipe:read("*a")
         pipe:close()
@@ -127,7 +195,7 @@ test("repeat cancellation and retry do not leak widgets or callbacks", function(
             message, { on_cancel = function() cancelled = true end })
         run_until(function() return cancelled end)
         assert(message._annas_closed and message.dismiss_callback == nil)
-        Ui.closeMessage(message) -- must be harmless when already closed
+        Ui.closeMessage(message)
     end
     local result
     Async.run(function() return {} end,
@@ -151,4 +219,4 @@ for _, warning in ipairs(warnings) do
     assert(not tostring(warning[1]):find("unwrapped", 1, true), "Trapper ran without wrap()")
 end
 print(string.format("%d integration tests passed", h.count()))
-return { UI = UI, Ui = Ui, test = test, run_until = run_until, native = native, finish = finish }
+return h

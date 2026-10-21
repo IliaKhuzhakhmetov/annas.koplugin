@@ -1,8 +1,6 @@
--- Network calls and io.popen() must run outside KOReader's UI process.
--- A coroutine alone does not make blocking I/O asynchronous.
 local UIManager = require("ui/uimanager")
 local Trapper = require("ui/trapper")
-local InfoMessage = require("ui/widget/infomessage")
+local ProgressbarDialog = require("ui/widget/progressbardialog")
 local T = require("annas.gettext")
 local logger = require("logger")
 
@@ -12,12 +10,12 @@ function AsyncHelper.run(task_func, on_success, on_error, loading_msg, options)
     options = options or {}
     local timeout_seconds = options.timeout_seconds or 90
     if not loading_msg then
-        loading_msg = InfoMessage:new{
-            text = T("Please wait…") .. "\n\n" .. T("Tap anywhere to cancel."),
-            dismissable = true,
-            flush_events_on_show = true,
+        loading_msg = ProgressbarDialog:new{
+            title = T("Please wait…"),
+            subtitle = T("Tap anywhere to cancel."),
+            modal = true,
         }
-        UIManager:show(loading_msg)
+        loading_msg:show()
     end
 
     local closed = false
@@ -36,21 +34,17 @@ function AsyncHelper.run(task_func, on_success, on_error, loading_msg, options)
         if on_error then on_error(message) end
     end
 
-    -- wrap() is required: without it Trapper falls back to blocking I/O.
     return Trapper:wrap(function()
         local timeout_action = function()
             timed_out = true
-            -- InfoMessage's dismiss callback resumes Trapper, which kills the
-            -- child process group (including any curl/wget shell children).
+
             if not closed then UIManager:close(loading_msg) end
         end
         UIManager:scheduleIn(timeout_seconds, timeout_action)
 
         local call_ok, completed, result = pcall(function()
             return Trapper:dismissableRunInSubprocess(function()
-                -- Only serializable data crosses back to the UI process.
-                -- Capture errors in the child so the user gets an explanation
-                -- instead of a successful completion with an empty pipe.
+
                 local ok, data = pcall(task_func)
                 if not ok then
                     return { ok = false, error = tostring(data) }
@@ -61,8 +55,7 @@ function AsyncHelper.run(task_func, on_success, on_error, loading_msg, options)
 
         UIManager:unschedule(timeout_action)
         local was_dismissed = closed
-        -- A programmatic close after success must not resume the already
-        -- running coroutine. A tap/timeout has already closed the widget.
+
         loading_msg.dismiss_callback = nil
         if not closed then UIManager:close(loading_msg) end
         loading_msg.onCloseWidget = on_close_widget
@@ -73,8 +66,7 @@ function AsyncHelper.run(task_func, on_success, on_error, loading_msg, options)
             fail(T("Operation timed out. Please try again."))
         elseif not completed then
             if was_dismissed then
-                -- User cancellation is not an error and must not deliver any
-                -- late result or bring back the loading dialog.
+
                 if options.on_cancel then UIManager:nextTick(options.on_cancel) end
             else
                 fail(T("Could not start the background task."))
