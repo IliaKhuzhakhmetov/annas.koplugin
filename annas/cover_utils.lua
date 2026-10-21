@@ -1,4 +1,3 @@
--- HTML/URL helpers shared by the scraper and the cover cache. No UI or I/O.
 local M = {}
 
 local function decode(text)

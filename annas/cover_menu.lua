@@ -27,7 +27,7 @@ function M:_coverLabel(book)
     end
     if state.stage == "download" then
         if state.total and state.total > 0 then
-            -- 100% is reserved for a validated image saved in the cache.
+
             return string.format("%d%%", math.min(99, math.floor((state.received or 0) * 100 / state.total)))
         end
         if state.received and state.received > 0 then
@@ -95,7 +95,7 @@ function M:updateItems(...)
         end
         self._cover_loader:start(books, function()
             if not self._cover_closed then
-                -- Rebuild image widgets without restarting this page's worker.
+
                 Menu.updateItems(self, nil, true)
             end
         end)

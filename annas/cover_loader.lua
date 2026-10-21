@@ -1,4 +1,3 @@
--- At most two isolated workers; each has its own deadline and progress pipe.
 local UIManager = require("ui/uimanager")
 local ffiutil = require("ffi/util")
 local ffi = require("ffi")
@@ -108,8 +107,7 @@ function M:_fill()
             local previous
             local function report(stage, received, total)
                 received, total = received or 0, total or 0
-                -- Small, bounded messages: percent changes or 8 KiB steps.
-                -- Progress never contains book text or URLs.
+
                 local bucket = total > 0 and math.floor(received * 100 / total) or math.ceil(received / 8192)
                 local signature = stage .. ":" .. bucket
                 if signature ~= previous then
@@ -174,7 +172,7 @@ function M:start(books, on_update)
             UIManager:scheduleIn(0.5, self.poll)
         else
             UIManager:unschedule(self.deadline)
-            -- No worker is writing cache .part files now: pruning is safe.
+
             pcall(CoverCache.prune)
         end
         if changed then on_update() end

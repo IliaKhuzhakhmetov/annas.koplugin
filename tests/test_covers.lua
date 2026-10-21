@@ -1,4 +1,3 @@
--- Run from plugin directory: luajit tests/test_covers.lua .
 local h = dofile("tests/headless.lua")
 local test, UI, run_until = h.test, h.UI, h.run_until
 local ffi = require("ffi")
@@ -195,7 +194,7 @@ test("cover deadline kills stalled metadata/image requests", function()
     serve(b, 10000000)
     local loader = Loader:new()
     loader:start({b}, function() assert(loader.states[b.md5].stage == "timeout") end)
-    -- Exercise the page deadline callback without waiting for its real limit.
+
     UI:unschedule(loader.deadline)
     UI:scheduleIn(0.03, loader.deadline)
     run_until(function() return loader.pid == nil end)

@@ -67,7 +67,6 @@ local function request(url, referer, max_bytes, progress)
     end
 end
 
--- Runs only in the background subprocess. Never requests metadata from the UI.
 function M.fetch(book, report)
     if not M.should_fetch(book) then return M.get(book) end
     report = report or function() end

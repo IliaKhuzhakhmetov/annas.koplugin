@@ -38,10 +38,6 @@ function Api.makeHttpRequest(options)
 
     logger.dbg(string.format("Annas:Api.makeHttpRequest - Request Params: URL: %s, Method: %s, Timeout: %s", request_params.url, request_params.method, tostring(options.timeout)))
 
-    -- LuaSocket exposes response headers on the connection before streaming
-    -- the body, but request() returns them only after the download. Observe
-    -- that boundary without sending a second HEAD request. Cover requests run
-    -- in isolated subprocesses, so this scoped hook cannot affect the UI's HTTP.
     local original_open
     if options.on_headers and type(http.open) == "function" then
         original_open = http.open

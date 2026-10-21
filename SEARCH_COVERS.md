@@ -6,4 +6,4 @@ Placeholders show whether a cover is queued, being looked up or connecting. Duri
 
 Covers come from the file or edition linked by the result. Files are checked for an image signature and limited to 1 MiB. They are stored under KOReader's data directory in `cache/annas-covers`, with atomic writes and a 160-file limit. Failed lookups are cached for five minutes. Remove this directory to clear the cache.
 
-See `tests/SEARCH_COVERS.md` for the tests. The search cancellation fix is a separate change; this feature can be merged independently.
+See `tests/SEARCH_COVERS.md` for the tests.

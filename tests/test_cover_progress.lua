@@ -1,4 +1,3 @@
--- Run from plugin directory: luajit tests/test_cover_progress.lua .
 local c = dofile("tests/test_covers.lua")
 local test, UI, run_until = c.test, c.UI, c.run_until
 local Cache, Loader, Menu = c.Cache, c.Loader, c.CoverMenu
@@ -122,7 +121,6 @@ test("split and invalid pipe messages cannot corrupt progress", function()
     assert(loader.states[b.md5].received == 50 and job.buffer == "")
 end)
 
--- Test the actual API header hook, not the cover transport double above.
 local fake_http = {}
 local response_headers = {["content-length"] = "8"}
 local wire_events, request_count = {}, 0
