@@ -43,8 +43,7 @@ local Trapper = dofile("tests/upstream/trapper.lua")
 package.preload["ui/trapper"] = function() return Trapper end
 local Async = require("annas.async_helper")
 local ffi = require("ffi")
-local UI, Ui, test, run_until, native, now = h.UI, h.Ui, h.test, h.run_until, h.native, h.now
-local warnings = h.warnings
+local UI, Ui, test, run_until, native = h.UI, h.Ui, h.test, h.run_until, h.native
 
 test("cancellable tasks use KOReader's native progress dialog", function()
     local message = Ui.showLoadingMessage("Searching", true)
@@ -55,86 +54,108 @@ test("cancellable tasks use KOReader's native progress dialog", function()
 end)
 
 test("native keyboard cancellation stops the background task", function()
-    local cancelled
+    local gate, cancelled = h.gate()
     local message = Ui.showLoadingMessage("Searching", true)
-    UI:scheduleIn(0.02, function() message:onAnyKeyPressed() end)
-    Async.run(function() ffi.C.usleep(10000000) end,
+    Async.run(function() gate:wait() end,
         function() error("cancelled task succeeded") end, function(err) error(err) end,
         message, {on_cancel = function() cancelled = true end})
+    run_until(function() return gate:waiting() end)
+    message:onAnyKeyPressed()
     run_until(function() return cancelled end)
     assert(#h.killed() == 1)
 end)
 
 test("default loading dialog is native and closes after success", function()
-    local result
-    Async.run(function() ffi.C.usleep(50000); return "done" end,
+    local gate, result = h.gate()
+    Async.run(function() gate:wait(); return "done" end,
         function(value) result = value end, function(err) error(err) end)
     local message = next(UI.widgets)
     assert(message and message.title == "Please wait…" and message.onTapClose)
+    gate:release()
     run_until(function() return result ~= nil end)
     assert(result == "done" and message._annas_closed)
 end)
 
 test("slow request yields UI; results survive serialization", function()
-    local result, heartbeat
-    UI:scheduleIn(0.02, function() heartbeat = true end)
-    local started = now()
+    local gate, result, heartbeat = h.gate()
     Async.run(function()
-        ffi.C.usleep(200000)
-        return {{ title = "Нейромант", author = "William Gibson", format = "epub" }}
+        gate:wait()
+        return {{title = "Нейромант", author = "William Gibson", format = "epub"}}
     end, function(value) result = value end, function(err) error(err) end,
         Ui.showLoadingMessage("Searching", true))
-    assert(now() - started < 0.15, "starting request blocked UI")
+    UI:nextTick(function() heartbeat = true end)
     run_until(function() return heartbeat end)
-    assert(result == nil, "heartbeat did not run while request was pending")
+    assert(result == nil, "request completed before the worker was released")
+    gate:release()
     run_until(function() return result ~= nil end)
     assert(result[1].title == "Нейромант" and result[1].format == "epub")
 end)
 
 test("tap cancels a hung worker without success/error or late result", function()
-    local succeeded, failed, cancelled
+    local gate, succeeded, failed, cancelled = h.gate()
     local message = Ui.showLoadingMessage("Searching", true)
-    UI:scheduleIn(0.04, function() message:onTapClose() end)
-    Async.run(function()
-        ffi.C.usleep(10000000)
-        return "late result"
-    end, function() succeeded = true end, function() failed = true end, message, {
-        on_cancel = function() cancelled = true end,
-    })
+    Async.run(function() gate:wait(); return "late result" end,
+        function() succeeded = true end, function() failed = true end, message,
+        {on_cancel = function() cancelled = true end})
+    run_until(function() return gate:waiting() end)
+    message:onTapClose()
     run_until(function() return cancelled end)
     assert(not succeeded and not failed and #h.killed() == 1)
     assert(message._annas_closed)
 end)
 
 test("deadline terminates a hung request and reports timeout", function()
-    local failure, success
-    Async.run(function() ffi.C.usleep(10000000) end,
+    local gate, failure, success = h.gate()
+    Async.run(function() gate:wait() end,
         function() success = true end, function(err) failure = err end,
-        Ui.showLoadingMessage("Searching", true), { timeout_seconds = 0.05 })
+        Ui.showLoadingMessage("Searching", true), {timeout_seconds = 90})
+    run_until(function() return gate:waiting() end)
+    UI:advance(90)
     run_until(function() return failure ~= nil end)
     assert(failure:find("timed out", 1, true) and not success and #h.killed() == 1)
 end)
 
 test("cancel kills shell and curl/wget-like descendants too", function()
-    local marker = os.tmpname()
-    os.remove(marker)
-    local message = Ui.showLoadingMessage("Downloading", true)
-    local cancelled
-    UI:scheduleIn(0.08, function() UI:close(message) end)
+    ffi.cdef[[int open(const char *, int, ...);]]
+    local temporary = os.getenv("ANNAS_TEST_TMPDIR")
+    local root = temporary and (temporary .. "/descendants") or os.tmpname()
+    os.remove(root)
+    local function quote(value) return "'" .. value:gsub("'", "'\\''") .. "'" end
+    assert(os.execute("mkdir -p " .. quote(root)) == 0)
+    h.after_each(function() assert(os.execute("rm -rf " .. quote(root)) == 0) end)
+    local fifo, ready, marker = root .. "/fifo", root .. "/ready", root .. "/stale"
+    assert(os.execute("mkfifo " .. quote(fifo)) == 0)
+    local message, cancelled = Ui.showLoadingMessage("Downloading", true)
     Async.run(function()
-
-        local pipe = assert(io.popen("sleep 0.4; printf stale > '" .. marker .. "'; printf result", "r"))
-        local data = pipe:read("*a")
+        local command = "exec 3<> " .. quote(fifo) .. "; printf ready > " .. quote(ready)
+            .. "; read signal <&3; printf stale > " .. quote(marker) .. "; printf result"
+        local pipe = assert(io.popen(command, "r"))
+        local result = pipe:read("*a")
         pipe:close()
-        return data
-    end, function() error("cancelled task delivered a result") end,
-        function(err) error(err) end, message, {
-            on_cancel = function() cancelled = true end,
-        })
+        return result
+    end, function() error("cancelled task delivered a result") end, function(err) error(err) end,
+        message, {on_cancel = function() cancelled = true end})
+    run_until(function()
+        local file = io.open(ready, "r")
+        if not file then return false end
+        local contents = file:read("*a")
+        file:close()
+        return contents == "ready"
+    end)
+    local flags = 1 + (ffi.os == "OSX" and 4 or 2048)
+    local fd = ffi.C.open(fifo, flags)
+    assert(fd >= 0, "shell has not opened its synchronization pipe")
+    ffi.C.close(fd)
+    message:onTapClose()
     run_until(function() return cancelled end)
-    ffi.C.usleep(500000)
+    run_until(function()
+        local current = ffi.C.open(fifo, flags)
+        if current >= 0 then ffi.C.close(current); return false end
+        assert(ffi.errno() == 6, "unexpected FIFO error")
+        return true
+    end)
     local file = io.open(marker, "r")
-    if file then file:close(); os.remove(marker) end
+    if file then file:close() end
     assert(file == nil, "descendant command continued after cancellation")
 end)
 
@@ -148,8 +169,10 @@ test("child exception is reported and closes loading widget", function()
 end)
 
 test("download path and filesystem changes reach parent", function()
-    local path, result = os.tmpname()
+    local temporary = os.getenv("ANNAS_TEST_TMPDIR")
+    local path, result = temporary and (temporary .. "/ebook") or os.tmpname()
     os.remove(path)
+    h.after_each(function() os.remove(path); os.remove(path .. ".part") end)
     Async.run(function()
         local file = assert(io.open(path .. ".part", "wb"))
         assert(file:write("ebook-test-bytes"))
@@ -187,12 +210,13 @@ end)
 
 test("repeat cancellation and retry do not leak widgets or callbacks", function()
     for i = 1, 3 do
+        local gate, cancelled = h.gate()
         local message = Ui.showLoadingMessage("Searching", true)
-        local cancelled
-        UI:scheduleIn(0.01, function() UI:close(message) end)
-        Async.run(function() ffi.C.usleep(10000000) end,
+        Async.run(function() gate:wait() end,
             function() error("unexpected success") end, function(err) error(err) end,
-            message, { on_cancel = function() cancelled = true end })
+            message, {on_cancel = function() cancelled = true end})
+        run_until(function() return gate:waiting() end)
+        message:onTapClose()
         run_until(function() return cancelled end)
         assert(message._annas_closed and message.dismiss_callback == nil)
         Ui.closeMessage(message)
@@ -214,9 +238,4 @@ test("structured API errors use error callback", function()
     assert(failure == "HTTP 503")
 end)
 
-for _, warning in ipairs(warnings) do
-    assert(warning[1] ~= "error in wrapped function:", tostring(warning[2]))
-    assert(not tostring(warning[1]):find("unwrapped", 1, true), "Trapper ran without wrap()")
-end
-print(string.format("%d integration tests passed", h.count()))
-return h
+h.run()

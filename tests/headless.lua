@@ -1,16 +1,23 @@
-local plugin_dir = arg[1] or "annas.koplugin"
+local plugin_dir = arg[1] or "."
+local selected, listing
+for i = 2, #arg do
+    if arg[i] == "--case" then selected = arg[i + 1] end
+    if arg[i] == "--list" then listing = true end
+end
 package.path = plugin_dir .. "/?.lua;" .. plugin_dir .. "/?/init.lua;" .. package.path
 io.stdout:setvbuf("no")
 local ffi = require("ffi")
 ffi.cdef[[
-struct timeval { long tv_sec; int tv_usec; };
-int gettimeofday(struct timeval *, void *);
+struct timespec { long tv_sec; long tv_nsec; };
+int clock_gettime(int, struct timespec *);
 ]]
 local function now()
-    local tv = ffi.new("struct timeval")
-    ffi.C.gettimeofday(tv, nil)
-    return tonumber(tv.tv_sec) + tonumber(tv.tv_usec) / 1000000
+    local ts = ffi.new("struct timespec")
+    assert(ffi.C.clock_gettime(ffi.os == "OSX" and 6 or 1, ts) == 0)
+    return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) / 1000000000
 end
+local offset = 0
+local function clock() return now() + offset end
 table.pack = table.pack or function(...) return { n = select("#", ...), ... } end
 
 local warnings = {}
@@ -24,8 +31,9 @@ package.preload["annas.gettext"] = package.preload.gettext
 
 local UI = { events = {}, widgets = {}, standby = 0 }
 function UI:scheduleIn(seconds, fn)
-    self.events[#self.events + 1] = { at = now() + seconds, fn = fn }
+    self.events[#self.events + 1] = { at = clock() + seconds, fn = fn }
 end
+function UI:advance(seconds) offset = offset + seconds end
 function UI:nextTick(fn) self:scheduleIn(0, fn) end
 function UI:unschedule(fn)
     for i = #self.events, 1, -1 do
@@ -81,7 +89,15 @@ local spawned, killed = {}, {}
 local spawn = native.runInSubProcess
 native.runInSubProcess = function(...)
     local pid, fd = spawn(...)
-    if pid then spawned[#spawned + 1] = pid end
+    if pid then
+        spawned[#spawned + 1] = pid
+        local registry = os.getenv("ANNAS_TEST_PROCESS_LOG")
+        if registry then
+            local file = assert(io.open(registry, "a"))
+            file:write(tostring(pid), "\n")
+            file:close()
+        end
+    end
     return pid, fd
 end
 local terminate = native.terminateSubProcess
@@ -100,7 +116,7 @@ local function run_until(predicate, limit)
         for i, event in ipairs(UI.events) do
             if not selected or event.at < UI.events[selected].at then selected = i end
         end
-        if selected and UI.events[selected].at <= now() then
+        if selected and UI.events[selected].at <= clock() then
             local event = table.remove(UI.events, selected)
             event.fn()
         else
@@ -109,8 +125,28 @@ local function run_until(predicate, limit)
     end
 end
 
+local cleanups, cases = {}, {}
+local function after_each(fn) cleanups[#cleanups + 1] = fn end
+local function cleanup()
+    local errors = {}
+    for _, pid in ipairs(spawned) do
+        ffi.C.kill(-pid, 9)
+    end
+    for _, pid in ipairs(spawned) do
+        local ok, err = pcall(run_until, function()
+            if native.isSubProcessDone(pid) then return true end
+            ffi.C.kill(-pid, 9)
+            return false
+        end)
+        if not ok then errors[#errors + 1] = tostring(err) end
+    end
+    for i = #cleanups, 1, -1 do
+        local ok, err = pcall(cleanups[i])
+        if not ok then errors[#errors + 1] = tostring(err) end
+    end
+    return table.concat(errors, "\n")
+end
 local function finish()
-
     for _, pid in ipairs(spawned) do
         run_until(function() return native.isSubProcessDone(pid) end)
     end
@@ -120,16 +156,61 @@ local function finish()
     assert(#UI.events == 0, "stale timer/callback after completion")
     assert(next(UI.widgets) == nil, "loading widget was left open")
     assert(UI.standby == 0, "standby inhibition leaked")
-    spawned, killed = {}, {}
+    for _, warning in ipairs(warnings) do
+        assert(warning[1] ~= "error in wrapped function:", tostring(warning[2]))
+        assert(not tostring(warning[1]):find("unwrapped", 1, true), "Trapper ran without wrap()")
+    end
 end
-
-local count = 0
+local function gate()
+    local ready, release = ffi.new("int[2]"), ffi.new("int[2]")
+    assert(ffi.C.pipe(ready) == 0 and ffi.C.pipe(release) == 0)
+    local closed, released = false, false
+    local g = {}
+    function g:wait()
+        assert(ffi.C.write(ready[1], "x", 1) == 1)
+        local byte = ffi.new("char[1]")
+        assert(ffi.C.read(release[0], byte, 1) == 1)
+    end
+    function g:waiting()
+        return (native.getNonBlockingReadSize(tonumber(ready[0])) or 0) > 0
+    end
+    function g:release()
+        assert(not released, "gate released twice")
+        assert(ffi.C.write(release[1], "x", 1) == 1)
+        released = true
+    end
+    after_each(function()
+        if closed then return end
+        closed = true
+        ffi.C.close(ready[0]); ffi.C.close(ready[1])
+        ffi.C.close(release[0]); ffi.C.close(release[1])
+    end)
+    return g
+end
 local function test(name, fn)
-    fn()
-    finish()
-    count = count + 1
-    print("PASS " .. name)
+    for _, case in ipairs(cases) do assert(case.name ~= name, "duplicate test name: " .. name) end
+    cases[#cases + 1] = {name = name, fn = fn}
 end
-
-return { UI = UI, Ui = Ui, test = test, run_until = run_until, native = native, finish = finish,
-    now = now, warnings = warnings, killed = function() return killed end, count = function() return count end }
+local function run()
+    if listing then
+        for _, case in ipairs(cases) do print("TEST\t" .. case.name) end
+        assert(cleanup() == "")
+        return
+    end
+    assert(selected, "Use python3 tests/run.py, or select one test with --case")
+    local found
+    for _, case in ipairs(cases) do
+        if case.name == selected then found = case; break end
+    end
+    assert(found, "unknown test: " .. selected)
+    local ok, err = xpcall(function() found.fn(); finish() end, debug.traceback)
+    local cleanup_error = cleanup()
+    if not ok or cleanup_error ~= "" then
+        io.stderr:write("FAIL " .. selected .. "\n" .. tostring(err or "") .. "\n" .. cleanup_error .. "\n")
+        os.exit(1)
+    end
+    print("PASS " .. selected)
+end
+return {UI = UI, Ui = Ui, test = test, run_until = run_until, native = native,
+    now = now, warnings = warnings, killed = function() return killed end,
+    gate = gate, after_each = after_each, run = run}

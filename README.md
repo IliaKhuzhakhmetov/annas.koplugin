@@ -167,3 +167,10 @@ and follow the instructions for your specific router.
 
 KOReader, Z-library, e-reader, plugin, ebook, download, KOReader plugin, Z-library integration, digital library, e-ink, bookworm, reading, open source.
 </details>
+
+
+## Tests
+
+Run `python3 tests/run.py` with LuaJIT 2.1 on PATH. Each test runs in a separate process.
+
+The test fixtures in `tests/upstream/` come from KOReader v2026.07.2 (`frontend/ui/trapper.lua` and `frontend/ui/widget/progressbardialog.lua`) and koreader-base `ffi/util.lua` at `ab0d8e2a2cfbbd3b57f7975077b0b124eac8dcd2`. They are used only by tests.
