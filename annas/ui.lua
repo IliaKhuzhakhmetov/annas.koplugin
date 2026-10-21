@@ -62,14 +62,23 @@ function Ui.showErrorMessage(text)
     end
 end
 
-function Ui.showLoadingMessage(text)
-    local message = InfoMessage:new{ text = text, timeout = 0 }
+function Ui.showLoadingMessage(text, cancellable)
+    if cancellable then
+        text = text .. "\n\n" .. T("Tap anywhere to cancel.")
+    end
+    -- timeout=0 schedules an immediate dismissal once the UI starts yielding.
+    -- AsyncHelper owns the operation deadline and cancellation callback.
+    local message = InfoMessage:new{
+        text = text,
+        dismissable = true,
+        flush_events_on_show = true,
+    }
     UIManager:show(message)
     return message
 end
 
 function Ui.closeMessage(message_widget)
-    if message_widget then
+    if message_widget and not message_widget._annas_closed then
         if type(message_widget.close) == "function" then
             message_widget:close()
             -- Ensure complete screen refresh after closing the progress dialog
