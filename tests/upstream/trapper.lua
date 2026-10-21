@@ -687,4 +687,3 @@ function Trapper:dismissableRunInSubprocess(task, trap_widget_or_string, task_re
 end
 
 return Trapper
-
