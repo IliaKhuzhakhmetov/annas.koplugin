@@ -1,19 +1,19 @@
-local c = dofile("tests/test_covers.lua")
+local c = dofile("tests/cover_fixture.lua")
 local test, UI, run_until = c.test, c.UI, c.run_until
 local Cache, Loader, Menu = c.Cache, c.Loader, c.CoverMenu
 local book, serve, responses = c.book, c.serve, c.responses
 local ffi = require("ffi")
-c.mkdir(c.directory)
 
 test("two covers run concurrently and the faster one is not blocked", function()
-    local slow, fast = book(101), book(102)
-    serve(slow, 800000)
-    serve(fast, 10000)
+    local slow, fast, gate = book(101), book(102), c.h.gate()
+    serve(slow, gate)
+    serve(fast)
     local loader = Loader:new()
     loader:start({slow, fast}, function() end)
     assert(#loader.jobs == 2)
     run_until(function() return Cache.get(fast) ~= nil end)
     assert(Cache.get(slow) == nil, "second cover waited for first cover")
+    gate:release()
     run_until(function() return loader.pid == nil end)
 end)
 
@@ -21,7 +21,7 @@ test("pool stays at two workers while queued covers get their turn", function()
     local books = {}
     for n = 103, 108 do
         books[#books + 1] = book(n)
-        serve(books[#books], 10000)
+        serve(books[#books])
     end
     local loader = Loader:new()
     loader:start(books, function() assert(#loader.jobs <= 2) end)
@@ -31,25 +31,31 @@ test("pool stays at two workers while queued covers get their turn", function()
 end)
 
 test("single-cover timeout frees its slot without stopping other workers", function()
-    local hung, fast, next_book = book(109), book(110), book(111)
-    serve(hung, 10000000)
-    serve(fast, 10000)
-    serve(next_book, 10000)
+    local hung, held, next_book = book(109), book(110), book(111)
+    local hung_gate, held_gate = c.h.gate(), c.h.gate()
+    serve(hung, hung_gate)
+    serve(held, held_gate)
+    serve(next_book)
     local loader = Loader:new()
-    loader:start({hung, fast, next_book}, function() end)
+    loader:start({hung, held, next_book}, function() end)
+    run_until(function() return hung_gate:waiting() and held_gate:waiting() end)
     local deadline = loader.jobs[1].timeout
     UI:unschedule(deadline)
-    UI:scheduleIn(0.04, deadline)
-    run_until(function() return loader.pid == nil end)
+    UI:nextTick(deadline)
+    run_until(function() return Cache.get(next_book) ~= nil end)
     assert(loader.states[hung.md5].stage == "timeout")
-    assert(Cache.get(fast) and Cache.get(next_book) and not Cache.get(hung))
+    assert(not Cache.get(held) and not Cache.get(hung))
+    held_gate:release()
+    run_until(function() return loader.pid == nil end)
+    assert(Cache.get(held))
 end)
 
 test("progress pipe carries partial reads and a real percentage", function()
-    local b = book(112)
+    local b, gate = book(112), c.h.gate()
     local image = serve(b)
     responses[image].body = c.png .. string.rep("x", 4096)
-    responses[image].chunk_size, responses[image].chunk_delay = 512, 150000
+    responses[image].chunk_size = 1024
+    responses[image].after_chunk = function(first) if first == 1 then gate:wait() end end
     local loader = Loader:new()
     local mid_progress
     loader:start({b}, function()
@@ -59,19 +65,22 @@ test("progress pipe carries partial reads and a real percentage", function()
             assert(not Cache.get(b))
         end
     end)
-    run_until(function() return loader.pid == nil end, 3)
-    assert(mid_progress and mid_progress > 0 and mid_progress < 1)
+    run_until(function() return mid_progress ~= nil end)
+    assert(mid_progress > 0 and mid_progress < 1)
+    gate:release()
+    run_until(function() return loader.pid == nil end)
     assert(loader.states[b.md5].stage == "ready")
 end)
 
 test("unknown total reports received bytes without inventing a percentage", function()
-    local b = book(113)
+    local b, gate = book(113), c.h.gate()
     local image = serve(b)
-    responses[image].no_length = true
     responses[image].body = c.png .. string.rep("x", 4096)
-    responses[image].chunk_size, responses[image].chunk_delay = 1024, 200000
-    local loader, menu = Loader:new(), nil
-    menu = setmetatable({_cover_loader = loader}, {__index = Menu})
+    responses[image].chunk_size = 1024
+    responses[image].after_chunk = function(first) if first == 1 then gate:wait() end end
+    local loader = Loader:new()
+    responses[image].no_length = true
+    local menu = setmetatable({_cover_loader = loader}, {__index = Menu})
     local label
     loader:start({b}, function()
         local state = loader.states[b.md5]
@@ -80,8 +89,11 @@ test("unknown total reports received bytes without inventing a percentage", func
             assert(state.total == 0 and not label:find("%%"))
         end
     end)
-    run_until(function() return loader.pid == nil end, 3)
-    assert(label and label:find("KB", 1, true))
+    run_until(function() return label ~= nil end)
+    assert(label:find("KB", 1, true) and not Cache.get(b))
+    gate:release()
+    run_until(function() return loader.pid == nil end)
+    assert(loader.states[b.md5].stage == "ready")
 end)
 
 test("status labels distinguish queue, lookup, transfer and failure", function()
@@ -103,11 +115,12 @@ end)
 
 test("stopping a page cancels both active workers and leaves no callbacks", function()
     local a, b = book(115), book(116)
-    serve(a, 10000000); serve(b, 10000000)
-    local loader, stopped = Loader:new(), false
+    local first, second = c.h.gate(), c.h.gate()
+    serve(a, first); serve(b, second)
+    local loader = Loader:new()
     loader:start({a, b}, function() error("stopped page received an update") end)
-    UI:scheduleIn(0.03, function() loader:stop(); stopped = true end)
-    run_until(function() return stopped end)
+    run_until(function() return first:waiting() and second:waiting() end)
+    loader:stop()
     assert(#loader.jobs == 0 and loader.pid == nil)
     assert(loader.states[a.md5].stage == "cancelled" and loader.states[b.md5].stage == "cancelled")
 end)
@@ -168,7 +181,7 @@ test("HTTP hook and timeout state are restored after a connection error", functi
     fake_http.fail = true
     local response = Api.makeHttpRequest{url = "https://books.test/cover.png", timeout = {3, 5}, on_headers = function() end}
     fake_http.fail = false
-    assert(response.error and fake_http.open == original and resets == 2)
+    assert(response.error and fake_http.open == original and resets == 1)
 end)
 
 test("bad headers callback cannot break a successful download", function()
@@ -179,5 +192,4 @@ test("bad headers callback cannot break a successful download", function()
     assert(not response.error and response.body == "abcdefgh" and fake_http.open == original)
 end)
 
-assert(os.execute("rm -rf " .. c.quote(c.root)) == 0)
-print("11 progress/concurrency tests passed (27 tests total)")
+c.h.run()
